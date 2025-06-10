@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstring>
 #include <unordered_set>
 
@@ -9,13 +10,14 @@
 #include "platform.h"
 #include "remapper.h"
 
-const uint8_t CONFIG_VERSION = 10;
+const uint8_t CONFIG_VERSION = 18;
 
 const uint8_t CONFIG_FLAG_UNMAPPED_PASSTHROUGH = 0x01;
 const uint8_t CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK = 0b00001111;
 const uint8_t CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT = 0;
 const uint8_t CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT = 4;
 const uint8_t CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT = 5;
+const uint8_t CONFIG_FLAG_NORMALIZE_GAMEPAD_INPUTS_BIT = 6;
 
 ConfigCommand last_config_command = ConfigCommand::NO_COMMAND;
 uint32_t requested_index = 0;
@@ -35,6 +37,17 @@ bool command_version_ok(const uint8_t* buffer) {
     return version == CONFIG_VERSION;
 }
 
+static mapping_config11_t mapping_config_10_to_11(mapping_config10_t mapping) {
+    return (mapping_config11_t){
+        .target_usage = mapping.target_usage,
+        .source_usage = mapping.source_usage,
+        .scaling = mapping.scaling,
+        .layer_mask = mapping.layer_mask,
+        .flags = mapping.flags,
+        .hub_ports = 0,
+    };
+}
+
 void load_config_v3_v4(const uint8_t* persisted_config) {
     persist_config_v4_t* config = (persist_config_v4_t*) persisted_config;
     if (config->version == 3) {
@@ -46,16 +59,16 @@ void load_config_v3_v4(const uint8_t* persisted_config) {
     }
     partial_scroll_timeout = config->partial_scroll_timeout;
     interval_override = config->interval_override;
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (persisted_config + sizeof(persist_config_v4_t));
+    mapping_config10_t* buffer_mappings = (mapping_config10_t*) (persisted_config + sizeof(persist_config_v4_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
-        config_mappings.push_back(buffer_mappings[i]);
+        config_mappings.push_back(mapping_config_10_to_11(buffer_mappings[i]));
         if (config->version == 3) {
             config_mappings.back().layer_mask = 1 << config_mappings.back().layer_mask;
         }
     }
 
     if (config->version >= 4) {
-        const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v4_t) + config->mapping_count * sizeof(mapping_config_t));
+        const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v4_t) + config->mapping_count * sizeof(mapping_config10_t));
         my_mutex_enter(MutexId::MACROS);
         for (int i = 0; i < NMACROS_8; i++) {
             macros[i].clear();
@@ -84,12 +97,12 @@ void load_config_v5(const uint8_t* persisted_config) {
     partial_scroll_timeout = config->partial_scroll_timeout;
     tap_hold_threshold = config->tap_hold_threshold;
     interval_override = config->interval_override;
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (persisted_config + sizeof(persist_config_v5_t));
+    mapping_config10_t* buffer_mappings = (mapping_config10_t*) (persisted_config + sizeof(persist_config_v5_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
-        config_mappings.push_back(buffer_mappings[i]);
+        config_mappings.push_back(mapping_config_10_to_11(buffer_mappings[i]));
     }
 
-    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v5_t) + config->mapping_count * sizeof(mapping_config_t));
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v5_t) + config->mapping_count * sizeof(mapping_config10_t));
     my_mutex_enter(MutexId::MACROS);
     for (int i = 0; i < NMACROS_8; i++) {
         macros[i].clear();
@@ -117,12 +130,12 @@ void load_config_v6(const uint8_t* persisted_config) {
     partial_scroll_timeout = config->partial_scroll_timeout;
     tap_hold_threshold = config->tap_hold_threshold;
     interval_override = config->interval_override;
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (persisted_config + sizeof(persist_config_v6_t));
+    mapping_config10_t* buffer_mappings = (mapping_config10_t*) (persisted_config + sizeof(persist_config_v6_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
-        config_mappings.push_back(buffer_mappings[i]);
+        config_mappings.push_back(mapping_config_10_to_11(buffer_mappings[i]));
     }
 
-    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v6_t) + config->mapping_count * sizeof(mapping_config_t));
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v6_t) + config->mapping_count * sizeof(mapping_config10_t));
     my_mutex_enter(MutexId::MACROS);
     for (int i = 0; i < NMACROS_8; i++) {
         macros[i].clear();
@@ -173,12 +186,12 @@ void load_config_v7_v8(const uint8_t* persisted_config) {
     tap_hold_threshold = config->tap_hold_threshold;
     gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
     interval_override = config->interval_override;
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (persisted_config + sizeof(persist_config_v7_t));
+    mapping_config10_t* buffer_mappings = (mapping_config10_t*) (persisted_config + sizeof(persist_config_v7_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
-        config_mappings.push_back(buffer_mappings[i]);
+        config_mappings.push_back(mapping_config_10_to_11(buffer_mappings[i]));
     }
 
-    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v7_t) + config->mapping_count * sizeof(mapping_config_t));
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v7_t) + config->mapping_count * sizeof(mapping_config10_t));
     my_mutex_enter(MutexId::MACROS);
     for (int i = 0; i < NMACROS; i++) {
         macros[i].clear();
@@ -232,12 +245,12 @@ void load_config_v9(const uint8_t* persisted_config) {
     if (our_descriptor_number >= NOUR_DESCRIPTORS) {
         our_descriptor_number = 0;
     }
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (persisted_config + sizeof(persist_config_v9_t));
+    mapping_config10_t* buffer_mappings = (mapping_config10_t*) (persisted_config + sizeof(persist_config_v9_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
-        config_mappings.push_back(buffer_mappings[i]);
+        config_mappings.push_back(mapping_config_10_to_11(buffer_mappings[i]));
     }
 
-    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v9_t) + config->mapping_count * sizeof(mapping_config_t));
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v9_t) + config->mapping_count * sizeof(mapping_config10_t));
     my_mutex_enter(MutexId::MACROS);
     for (int i = 0; i < NMACROS; i++) {
         macros[i].clear();
@@ -278,12 +291,276 @@ void load_config_v9(const uint8_t* persisted_config) {
     my_mutex_exit(MutexId::EXPRESSIONS);
 }
 
+void load_config_v10(const uint8_t* persisted_config) {
+    persist_config_v10_t* config = (persist_config_v10_t*) persisted_config;
+    unmapped_passthrough_layer_mask =
+        (config->flags & CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK) >> CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT;
+    ignore_auth_dev_inputs = config->flags & (1 << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT);
+    gpio_output_mode = !!(config->flags & (1 << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT));
+    partial_scroll_timeout = config->partial_scroll_timeout;
+    tap_hold_threshold = config->tap_hold_threshold;
+    gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
+    interval_override = config->interval_override;
+    our_descriptor_number = config->our_descriptor_number;
+    if (our_descriptor_number >= NOUR_DESCRIPTORS) {
+        our_descriptor_number = 0;
+    }
+    macro_entry_duration = config->macro_entry_duration;
+    mapping_config10_t* buffer_mappings = (mapping_config10_t*) (persisted_config + sizeof(persist_config_v10_t));
+    for (uint32_t i = 0; i < config->mapping_count; i++) {
+        config_mappings.push_back(mapping_config_10_to_11(buffer_mappings[i]));
+    }
+
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v10_t) + config->mapping_count * sizeof(mapping_config10_t));
+    my_mutex_enter(MutexId::MACROS);
+    for (int i = 0; i < NMACROS; i++) {
+        macros[i].clear();
+        uint8_t macro_len = *macros_config_ptr;
+        macros_config_ptr++;
+        macros[i].reserve(macro_len);
+        for (int j = 0; j < macro_len; j++) {
+            uint8_t entry_len = *macros_config_ptr;
+            macros_config_ptr++;
+            macros[i].push_back({});
+            macros[i].back().reserve(entry_len);
+            for (int k = 0; k < entry_len; k++) {
+                macros[i].back().push_back(((macro_item_t*) macros_config_ptr)->usage);
+                macros_config_ptr += sizeof(macro_item_t);
+            }
+        }
+    }
+    my_mutex_exit(MutexId::MACROS);
+
+    const uint8_t* expr_config_ptr = macros_config_ptr;
+    my_mutex_enter(MutexId::EXPRESSIONS);
+    for (int i = 0; i < NEXPRESSIONS; i++) {
+        expressions[i].clear();
+        uint8_t expr_len = *expr_config_ptr;
+        expr_config_ptr++;
+        expressions[i].reserve(expr_len);
+        for (int j = 0; j < expr_len; j++) {
+            uint8_t op = *expr_config_ptr;
+            expr_config_ptr++;
+            uint32_t val = 0;
+            if ((op == (uint8_t) Op::PUSH) || (op == (uint8_t) Op::PUSH_USAGE)) {
+                val = ((expr_val_t*) expr_config_ptr)->val;
+                expr_config_ptr += sizeof(expr_val_t);
+            }
+            expressions[i].push_back((expr_elem_t){ .op = (Op) op, .val = val });
+        }
+    }
+    my_mutex_exit(MutexId::EXPRESSIONS);
+}
+
+void load_config_v11(const uint8_t* persisted_config) {
+    persist_config_v11_t* config = (persist_config_v11_t*) persisted_config;
+    unmapped_passthrough_layer_mask =
+        (config->flags & CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK) >> CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT;
+    ignore_auth_dev_inputs = config->flags & (1 << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT);
+    gpio_output_mode = !!(config->flags & (1 << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT));
+    partial_scroll_timeout = config->partial_scroll_timeout;
+    tap_hold_threshold = config->tap_hold_threshold;
+    gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
+    interval_override = config->interval_override;
+    our_descriptor_number = config->our_descriptor_number;
+    if (our_descriptor_number >= NOUR_DESCRIPTORS) {
+        our_descriptor_number = 0;
+    }
+    macro_entry_duration = config->macro_entry_duration;
+    mapping_config11_t* buffer_mappings = (mapping_config11_t*) (persisted_config + sizeof(persist_config_v11_t));
+    for (uint32_t i = 0; i < config->mapping_count; i++) {
+        config_mappings.push_back(buffer_mappings[i]);
+    }
+
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v11_t) + config->mapping_count * sizeof(mapping_config11_t));
+    my_mutex_enter(MutexId::MACROS);
+    for (int i = 0; i < NMACROS; i++) {
+        macros[i].clear();
+        uint8_t macro_len = *macros_config_ptr;
+        macros_config_ptr++;
+        macros[i].reserve(macro_len);
+        for (int j = 0; j < macro_len; j++) {
+            uint8_t entry_len = *macros_config_ptr;
+            macros_config_ptr++;
+            macros[i].push_back({});
+            macros[i].back().reserve(entry_len);
+            for (int k = 0; k < entry_len; k++) {
+                macros[i].back().push_back(((macro_item_t*) macros_config_ptr)->usage);
+                macros_config_ptr += sizeof(macro_item_t);
+            }
+        }
+    }
+    my_mutex_exit(MutexId::MACROS);
+
+    const uint8_t* expr_config_ptr = macros_config_ptr;
+    my_mutex_enter(MutexId::EXPRESSIONS);
+    for (int i = 0; i < NEXPRESSIONS; i++) {
+        expressions[i].clear();
+        uint8_t expr_len = *expr_config_ptr;
+        expr_config_ptr++;
+        expressions[i].reserve(expr_len);
+        for (int j = 0; j < expr_len; j++) {
+            uint8_t op = *expr_config_ptr;
+            expr_config_ptr++;
+            uint32_t val = 0;
+            if ((op == (uint8_t) Op::PUSH) || (op == (uint8_t) Op::PUSH_USAGE)) {
+                val = ((expr_val_t*) expr_config_ptr)->val;
+                expr_config_ptr += sizeof(expr_val_t);
+            }
+            expressions[i].push_back((expr_elem_t){ .op = (Op) op, .val = val });
+        }
+    }
+    my_mutex_exit(MutexId::EXPRESSIONS);
+}
+
+void load_config_v12(const uint8_t* persisted_config) {
+    persist_config_v12_t* config = (persist_config_v12_t*) persisted_config;
+    unmapped_passthrough_layer_mask = config->unmapped_passthrough_layer_mask;
+    ignore_auth_dev_inputs = config->flags & (1 << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT);
+    gpio_output_mode = !!(config->flags & (1 << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT));
+    partial_scroll_timeout = config->partial_scroll_timeout;
+    tap_hold_threshold = config->tap_hold_threshold;
+    gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
+    interval_override = config->interval_override;
+    our_descriptor_number = config->our_descriptor_number;
+    if (our_descriptor_number >= NOUR_DESCRIPTORS) {
+        our_descriptor_number = 0;
+    }
+    macro_entry_duration = config->macro_entry_duration;
+    mapping_config11_t* buffer_mappings = (mapping_config11_t*) (persisted_config + sizeof(persist_config_v12_t));
+    for (uint32_t i = 0; i < config->mapping_count; i++) {
+        config_mappings.push_back(buffer_mappings[i]);
+    }
+
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v12_t) + config->mapping_count * sizeof(mapping_config11_t));
+    my_mutex_enter(MutexId::MACROS);
+    for (int i = 0; i < NMACROS; i++) {
+        macros[i].clear();
+        uint8_t macro_len = *macros_config_ptr;
+        macros_config_ptr++;
+        macros[i].reserve(macro_len);
+        for (int j = 0; j < macro_len; j++) {
+            uint8_t entry_len = *macros_config_ptr;
+            macros_config_ptr++;
+            macros[i].push_back({});
+            macros[i].back().reserve(entry_len);
+            for (int k = 0; k < entry_len; k++) {
+                macros[i].back().push_back(((macro_item_t*) macros_config_ptr)->usage);
+                macros_config_ptr += sizeof(macro_item_t);
+            }
+        }
+    }
+    my_mutex_exit(MutexId::MACROS);
+
+    const uint8_t* expr_config_ptr = macros_config_ptr;
+    my_mutex_enter(MutexId::EXPRESSIONS);
+    for (int i = 0; i < NEXPRESSIONS; i++) {
+        expressions[i].clear();
+        uint8_t expr_len = *expr_config_ptr;
+        expr_config_ptr++;
+        expressions[i].reserve(expr_len);
+        for (int j = 0; j < expr_len; j++) {
+            uint8_t op = *expr_config_ptr;
+            expr_config_ptr++;
+            uint32_t val = 0;
+            if ((op == (uint8_t) Op::PUSH) || (op == (uint8_t) Op::PUSH_USAGE)) {
+                val = ((expr_val_t*) expr_config_ptr)->val;
+                expr_config_ptr += sizeof(expr_val_t);
+            }
+            expressions[i].push_back((expr_elem_t){ .op = (Op) op, .val = val });
+        }
+    }
+    my_mutex_exit(MutexId::EXPRESSIONS);
+
+    my_mutex_enter(MutexId::QUIRKS);
+    quirk_t* quirk_config_ptr = (quirk_t*) expr_config_ptr;
+    for (int i = 0; i < config->quirk_count; i++) {
+        quirks.push_back(*quirk_config_ptr);
+        quirk_config_ptr++;
+    }
+    my_mutex_exit(MutexId::QUIRKS);
+}
+
+void load_config_v13(const uint8_t* persisted_config) {
+    persist_config_v13_t* config = (persist_config_v13_t*) persisted_config;
+    unmapped_passthrough_layer_mask = config->unmapped_passthrough_layer_mask;
+    ignore_auth_dev_inputs = config->flags & (1 << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT);
+    gpio_output_mode = !!(config->flags & (1 << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT));
+    partial_scroll_timeout = config->partial_scroll_timeout;
+    tap_hold_threshold = config->tap_hold_threshold;
+    gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
+    interval_override = config->interval_override;
+    our_descriptor_number = config->our_descriptor_number;
+    if (our_descriptor_number >= NOUR_DESCRIPTORS) {
+        our_descriptor_number = 0;
+    }
+    macro_entry_duration = config->macro_entry_duration;
+    mapping_config11_t* buffer_mappings = (mapping_config11_t*) (persisted_config + sizeof(persist_config_v13_t));
+    for (uint32_t i = 0; i < config->mapping_count; i++) {
+        config_mappings.push_back(buffer_mappings[i]);
+    }
+
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v13_t) + config->mapping_count * sizeof(mapping_config11_t));
+    my_mutex_enter(MutexId::MACROS);
+    for (int i = 0; i < NMACROS; i++) {
+        macros[i].clear();
+        uint8_t macro_len = *macros_config_ptr;
+        macros_config_ptr++;
+        macros[i].reserve(macro_len);
+        for (int j = 0; j < macro_len; j++) {
+            uint8_t entry_len = *macros_config_ptr;
+            macros_config_ptr++;
+            macros[i].push_back({});
+            macros[i].back().reserve(entry_len);
+            for (int k = 0; k < entry_len; k++) {
+                macros[i].back().push_back(((macro_item_t*) macros_config_ptr)->usage);
+                macros_config_ptr += sizeof(macro_item_t);
+            }
+        }
+    }
+    my_mutex_exit(MutexId::MACROS);
+
+    const uint8_t* expr_config_ptr = macros_config_ptr;
+    my_mutex_enter(MutexId::EXPRESSIONS);
+    for (int i = 0; i < NEXPRESSIONS; i++) {
+        expressions[i].clear();
+        uint16_t expr_len = ((uint16_val_t*) expr_config_ptr)->val;
+        expr_config_ptr += 2;
+        expressions[i].reserve(expr_len);
+        for (int j = 0; j < expr_len; j++) {
+            uint8_t op = *expr_config_ptr;
+            expr_config_ptr++;
+            uint32_t val = 0;
+            if ((op == (uint8_t) Op::PUSH) || (op == (uint8_t) Op::PUSH_USAGE)) {
+                val = ((expr_val_t*) expr_config_ptr)->val;
+                expr_config_ptr += sizeof(expr_val_t);
+            }
+            expressions[i].push_back((expr_elem_t){ .op = (Op) op, .val = val });
+        }
+    }
+    my_mutex_exit(MutexId::EXPRESSIONS);
+
+    my_mutex_enter(MutexId::QUIRKS);
+    quirk_t* quirk_config_ptr = (quirk_t*) expr_config_ptr;
+    for (int i = 0; i < config->quirk_count; i++) {
+        quirks.push_back(*quirk_config_ptr);
+        quirk_config_ptr++;
+    }
+    my_mutex_exit(MutexId::QUIRKS);
+}
+
 void load_config(const uint8_t* persisted_config) {
     if (!checksum_ok(persisted_config, PERSISTED_CONFIG_SIZE) || !persisted_version_ok(persisted_config)) {
         return;
     }
 
     uint8_t version = ((config_version_t*) persisted_config)->version;
+
+    if (version < 18) {
+        // Normalize gamepad inputs defaults to true, but if we're loading a <18 config,
+        // set it to false to preserve previous behavior.
+        normalize_gamepad_inputs = false;
+    }
 
     if ((version == 3) || (version == 4)) {
         load_config_v3_v4(persisted_config);
@@ -310,11 +587,40 @@ void load_config(const uint8_t* persisted_config) {
         return;
     }
 
-    persist_config_v10_t* config = (persist_config_v10_t*) persisted_config;
-    unmapped_passthrough_layer_mask =
-        (config->flags & CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK) >> CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT;
+    if (version == 10) {
+        load_config_v10(persisted_config);
+        return;
+    }
+
+    if (version == 11) {
+        load_config_v11(persisted_config);
+        return;
+    }
+
+    if (version == 12) {
+        load_config_v12(persisted_config);
+        return;
+    }
+
+    // v14 is same as v13, it just introduces a new emulated device type
+    // v15 is same as v14, it just introduces some new expression ops
+    // v16 is same as v15, it just introduces a new expression op
+    // v17 is same as v16, it introduces new expression ops and GET_FEATURE retry behavior
+
+    if ((version == 13) ||
+        (version == 14) ||
+        (version == 15) ||
+        (version == 16) ||
+        (version == 17)) {
+        load_config_v13(persisted_config);
+        return;
+    }
+
+    persist_config_v18_t* config = (persist_config_v18_t*) persisted_config;
+    unmapped_passthrough_layer_mask = config->unmapped_passthrough_layer_mask;
     ignore_auth_dev_inputs = config->flags & (1 << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT);
     gpio_output_mode = !!(config->flags & (1 << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT));
+    normalize_gamepad_inputs = !!(config->flags & (1 << CONFIG_FLAG_NORMALIZE_GAMEPAD_INPUTS_BIT));
     partial_scroll_timeout = config->partial_scroll_timeout;
     tap_hold_threshold = config->tap_hold_threshold;
     gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
@@ -324,12 +630,12 @@ void load_config(const uint8_t* persisted_config) {
         our_descriptor_number = 0;
     }
     macro_entry_duration = config->macro_entry_duration;
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (persisted_config + sizeof(persist_config_v10_t));
+    mapping_config11_t* buffer_mappings = (mapping_config11_t*) (persisted_config + sizeof(persist_config_v18_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
         config_mappings.push_back(buffer_mappings[i]);
     }
 
-    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v10_t) + config->mapping_count * sizeof(mapping_config_t));
+    const uint8_t* macros_config_ptr = (persisted_config + sizeof(persist_config_v18_t) + config->mapping_count * sizeof(mapping_config11_t));
     my_mutex_enter(MutexId::MACROS);
     for (int i = 0; i < NMACROS; i++) {
         macros[i].clear();
@@ -353,8 +659,8 @@ void load_config(const uint8_t* persisted_config) {
     my_mutex_enter(MutexId::EXPRESSIONS);
     for (int i = 0; i < NEXPRESSIONS; i++) {
         expressions[i].clear();
-        uint8_t expr_len = *expr_config_ptr;
-        expr_config_ptr++;
+        uint16_t expr_len = ((uint16_val_t*) expr_config_ptr)->val;
+        expr_config_ptr += 2;
         expressions[i].reserve(expr_len);
         for (int j = 0; j < expr_len; j++) {
             uint8_t op = *expr_config_ptr;
@@ -368,15 +674,23 @@ void load_config(const uint8_t* persisted_config) {
         }
     }
     my_mutex_exit(MutexId::EXPRESSIONS);
+
+    my_mutex_enter(MutexId::QUIRKS);
+    quirk_t* quirk_config_ptr = (quirk_t*) expr_config_ptr;
+    for (int i = 0; i < config->quirk_count; i++) {
+        quirks.push_back(*quirk_config_ptr);
+        quirk_config_ptr++;
+    }
+    my_mutex_exit(MutexId::QUIRKS);
 }
 
 void fill_get_config(get_config_t* config) {
     config->version = CONFIG_VERSION;
     config->flags = 0;
-    config->flags |=
-        (unmapped_passthrough_layer_mask << CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT) & CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK;
     config->flags |= ignore_auth_dev_inputs << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT;
     config->flags |= gpio_output_mode << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT;
+    config->flags |= normalize_gamepad_inputs << CONFIG_FLAG_NORMALIZE_GAMEPAD_INPUTS_BIT;
+    config->unmapped_passthrough_layer_mask = unmapped_passthrough_layer_mask;
     config->partial_scroll_timeout = partial_scroll_timeout;
     config->tap_hold_threshold = tap_hold_threshold;
     config->gpio_debounce_time_ms = gpio_debounce_time / 1000;
@@ -386,15 +700,18 @@ void fill_get_config(get_config_t* config) {
     config->interval_override = interval_override;
     config->our_descriptor_number = our_descriptor_number;
     config->macro_entry_duration = macro_entry_duration;
+    my_mutex_enter(MutexId::QUIRKS);
+    config->quirk_count = quirks.size();
+    my_mutex_exit(MutexId::QUIRKS);
 }
 
 void fill_persist_config(persist_config_t* config) {
     config->version = CONFIG_VERSION;
     config->flags = 0;
-    config->flags |=
-        (unmapped_passthrough_layer_mask << CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT) & CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK;
     config->flags |= ignore_auth_dev_inputs << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT;
     config->flags |= gpio_output_mode << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT;
+    config->flags |= normalize_gamepad_inputs << CONFIG_FLAG_NORMALIZE_GAMEPAD_INPUTS_BIT;
+    config->unmapped_passthrough_layer_mask = unmapped_passthrough_layer_mask;
     config->partial_scroll_timeout = partial_scroll_timeout;
     config->tap_hold_threshold = tap_hold_threshold;
     config->gpio_debounce_time_ms = gpio_debounce_time / 1000;
@@ -402,21 +719,57 @@ void fill_persist_config(persist_config_t* config) {
     config->interval_override = interval_override;
     config->our_descriptor_number = our_descriptor_number;
     config->macro_entry_duration = macro_entry_duration;
+    my_mutex_enter(MutexId::QUIRKS);
+    config->quirk_count = quirks.size();
+    my_mutex_exit(MutexId::QUIRKS);
 }
 
-void persist_config() {
+PersistConfigReturnCode persist_config() {
     // stack size is 2KB
     static uint8_t buffer[PERSISTED_CONFIG_SIZE];
     memset(buffer, 0, sizeof(buffer));
 
     persist_config_t* config = (persist_config_t*) buffer;
     fill_persist_config(config);
-    mapping_config_t* buffer_mappings = (mapping_config_t*) (buffer + sizeof(persist_config_t));
+
+    // check if persisted config will fit in the space we have reserved for it in flash
+    int32_t real_persisted_config_size = 0;
+    real_persisted_config_size += sizeof(persist_config_t);
+    real_persisted_config_size += config->mapping_count * sizeof(mapping_config11_t);
+    my_mutex_enter(MutexId::MACROS);
+    for (int i = 0; i < NMACROS; i++) {
+        real_persisted_config_size += 1;
+        for (auto const& entries : macros[i]) {
+            real_persisted_config_size += 1 + entries.size() * sizeof(macro_item_t);
+        }
+    }
+    my_mutex_exit(MutexId::MACROS);
+    my_mutex_enter(MutexId::EXPRESSIONS);
+    for (int i = 0; i < NEXPRESSIONS; i++) {
+        real_persisted_config_size += 2;
+        for (auto const& elem : expressions[i]) {
+            real_persisted_config_size += 1;
+            if ((elem.op == Op::PUSH) || (elem.op == Op::PUSH_USAGE)) {
+                real_persisted_config_size += sizeof(expr_val_t);
+            }
+        }
+    }
+    my_mutex_exit(MutexId::EXPRESSIONS);
+    my_mutex_enter(MutexId::QUIRKS);
+    real_persisted_config_size += quirks.size() * sizeof(quirk_t);
+    my_mutex_exit(MutexId::QUIRKS);
+    real_persisted_config_size += 4;  // CRC32
+    if (real_persisted_config_size > PERSISTED_CONFIG_SIZE) {
+        printf("config too large to be persisted!\n");
+        return PersistConfigReturnCode::CONFIG_TOO_BIG;
+    }
+
+    mapping_config11_t* buffer_mappings = (mapping_config11_t*) (buffer + sizeof(persist_config_t));
     for (uint32_t i = 0; i < config->mapping_count; i++) {
         buffer_mappings[i] = config_mappings[i];
     }
 
-    uint8_t* macros_config_ptr = (buffer + sizeof(persist_config_t) + config->mapping_count * sizeof(mapping_config_t));
+    uint8_t* macros_config_ptr = (buffer + sizeof(persist_config_t) + config->mapping_count * sizeof(mapping_config11_t));
     my_mutex_enter(MutexId::MACROS);
     for (int i = 0; i < NMACROS; i++) {
         *macros_config_ptr = macros[i].size();
@@ -435,8 +788,8 @@ void persist_config() {
     uint8_t* expr_config_ptr = macros_config_ptr;
     my_mutex_enter(MutexId::EXPRESSIONS);
     for (int i = 0; i < NEXPRESSIONS; i++) {
-        *expr_config_ptr = expressions[i].size();
-        expr_config_ptr++;
+        ((uint16_val_t*) expr_config_ptr)->val = expressions[i].size();
+        expr_config_ptr += 2;
         for (auto const& elem : expressions[i]) {
             *expr_config_ptr = (uint8_t) elem.op;
             expr_config_ptr++;
@@ -448,9 +801,23 @@ void persist_config() {
     }
     my_mutex_exit(MutexId::EXPRESSIONS);
 
+    my_mutex_enter(MutexId::QUIRKS);
+    quirk_t* quirk_config_ptr = (quirk_t*) expr_config_ptr;
+    for (uint16_t i = 0; i < quirks.size(); i++) {
+        *quirk_config_ptr = quirks[i];
+        quirk_config_ptr++;
+    }
+    my_mutex_exit(MutexId::QUIRKS);
+
     ((crc32_t*) (buffer + PERSISTED_CONFIG_SIZE - 4))->crc32 = crc32(buffer, PERSISTED_CONFIG_SIZE - 4);
 
+    if (real_persisted_config_size != 4 + ((uint8_t*) quirk_config_ptr) - buffer) {
+        printf("we calculated real persisted config size wrong!\n");
+    }
+
     do_persist_config(buffer);
+
+    return PersistConfigReturnCode::SUCCESS;
 }
 
 void reset_resolution_multiplier() {
@@ -472,7 +839,7 @@ uint16_t handle_get_report1(uint8_t report_id, uint8_t* buffer, uint16_t reqlen)
                 break;
             }
             case ConfigCommand::GET_MAPPING: {
-                mapping_config_t* mapping_config = (mapping_config_t*) config_buffer;
+                mapping_config11_t* mapping_config = (mapping_config11_t*) config_buffer;
                 if (requested_index < config_mappings.size()) {
                     *mapping_config = config_mappings[requested_index];
                 }
@@ -519,7 +886,7 @@ uint16_t handle_get_report1(uint8_t report_id, uint8_t* buffer, uint16_t reqlen)
                         i++;
                     }
                     my_mutex_exit(MutexId::MACROS);
-                    if (exhausted && (ret_idx > 0)) {
+                    if (exhausted && (ret_idx > 0) && (returned->usages[ret_idx - 1] == 0)) {
                         ret_idx--;
                     }
                     returned->nitems = ret_idx;
@@ -532,7 +899,7 @@ uint16_t handle_get_report1(uint8_t report_id, uint8_t* buffer, uint16_t reqlen)
                 }
                 get_expr_response_t* returned = (get_expr_response_t*) config_buffer;
                 uint8_t* ptr = returned->elem_data;
-                uint8_t i = 0;
+                uint32_t i = 0;
                 for (auto const& elem : expressions[requested_index]) {
                     if (i >= requested_secondary_index) {
                         if ((elem.op == Op::PUSH) || (elem.op == Op::PUSH_USAGE)) {
@@ -558,8 +925,26 @@ uint16_t handle_get_report1(uint8_t report_id, uint8_t* buffer, uint16_t reqlen)
                 }
                 break;
             }
-            default:
+            case ConfigCommand::GET_QUIRK: {
+                quirk_t* quirk = (quirk_t*) config_buffer;
+                my_mutex_enter(MutexId::QUIRKS);
+                if (requested_index < quirks.size()) {
+                    *quirk = quirks[requested_index];
+                }
+                my_mutex_exit(MutexId::QUIRKS);
                 break;
+            }
+            case ConfigCommand::PERSIST_CONFIG: {
+                persist_config_response_t* returned = (persist_config_response_t*) config_buffer;
+                if (persist_config_return_code == PersistConfigReturnCode::UNKNOWN) {
+                    // persist_config() wasn't called yet
+                    return 0;
+                }
+                returned->return_code = persist_config_return_code;
+                break;
+            }
+            default:
+                return 0;
         }
         config_buffer->crc32 = crc32((uint8_t*) config_buffer, CONFIG_SIZE - 4);
         last_config_command = ConfigCommand::NO_COMMAND;
@@ -582,10 +967,10 @@ void handle_set_report1(uint8_t report_id, uint8_t const* buffer, uint16_t bufsi
                     break;
                 case ConfigCommand::SET_CONFIG: {
                     set_config_t* config = (set_config_t*) config_buffer->data;
-                    unmapped_passthrough_layer_mask =
-                        (config->flags & CONFIG_FLAG_UNMAPPED_PASSTHROUGH_MASK) >> CONFIG_FLAG_UNMAPPED_PASSTHROUGH_BIT;
+                    unmapped_passthrough_layer_mask = config->unmapped_passthrough_layer_mask;
                     ignore_auth_dev_inputs = config->flags & (1 << CONFIG_FLAG_IGNORE_AUTH_DEV_INPUTS_BIT);
                     gpio_output_mode = !!(config->flags & (1 << CONFIG_FLAG_GPIO_OUTPUT_MODE_BIT));
+                    normalize_gamepad_inputs = !!(config->flags & (1 << CONFIG_FLAG_NORMALIZE_GAMEPAD_INPUTS_BIT));
                     partial_scroll_timeout = config->partial_scroll_timeout;
                     tap_hold_threshold = config->tap_hold_threshold;
                     gpio_debounce_time = config->gpio_debounce_time_ms * 1000;
@@ -599,37 +984,37 @@ void handle_set_report1(uint8_t report_id, uint8_t const* buffer, uint16_t bufsi
                         our_descriptor_number = 0;
                     }
                     macro_entry_duration = config->macro_entry_duration;
-                    config_updated = true;
                     break;
                 }
                 case ConfigCommand::GET_CONFIG:
                     break;
                 case ConfigCommand::CLEAR_MAPPING:
                     config_mappings.clear();
-                    config_updated = true;
                     break;
                 case ConfigCommand::ADD_MAPPING: {
-                    mapping_config_t* mapping_config = (mapping_config_t*) config_buffer->data;
+                    mapping_config11_t* mapping_config = (mapping_config11_t*) config_buffer->data;
                     config_mappings.push_back(*mapping_config);
-                    config_updated = true;
                     break;
                 }
                 case ConfigCommand::GET_MAPPING:
                 case ConfigCommand::GET_OUR_USAGES:
-                case ConfigCommand::GET_THEIR_USAGES: {
+                case ConfigCommand::GET_THEIR_USAGES:
+                case ConfigCommand::GET_QUIRK: {
                     get_indexed_t* get_indexed = (get_indexed_t*) config_buffer->data;
                     requested_index = get_indexed->requested_index;
                     break;
                 }
                 case ConfigCommand::PERSIST_CONFIG:
                     need_to_persist_config = true;
+                    persist_config_return_code = PersistConfigReturnCode::UNKNOWN;
                     break;
                 case ConfigCommand::SUSPEND:
                     suspended = true;
                     break;
                 case ConfigCommand::RESUME:
-                    suspended = false;
-                    // XXX clear input_state, sticky_state, accumulated?
+                    resume_pending = true;
+                    config_updated = true;
+                    reset_state();
                     break;
                 case ConfigCommand::PAIR_NEW_DEVICE:
                     pair_new_device();
@@ -703,7 +1088,6 @@ void handle_set_report1(uint8_t report_id, uint8_t const* buffer, uint16_t bufsi
                         }
                     }
                     my_mutex_exit(MutexId::EXPRESSIONS);
-                    config_updated = true;
                     break;
                 }
                 case ConfigCommand::GET_EXPRESSION: {
@@ -715,6 +1099,18 @@ void handle_set_report1(uint8_t report_id, uint8_t const* buffer, uint16_t bufsi
                 case ConfigCommand::SET_MONITOR_ENABLED: {
                     monitor_t* monitor = (monitor_t*) config_buffer->data;
                     set_monitor_enabled(monitor->enabled);
+                    break;
+                }
+                case ConfigCommand::CLEAR_QUIRKS:
+                    my_mutex_enter(MutexId::QUIRKS);
+                    quirks.clear();
+                    my_mutex_exit(MutexId::QUIRKS);
+                    break;
+                case ConfigCommand::ADD_QUIRK: {
+                    quirk_t* quirk = (quirk_t*) config_buffer->data;
+                    my_mutex_enter(MutexId::QUIRKS);
+                    quirks.push_back(*quirk);
+                    my_mutex_exit(MutexId::QUIRKS);
                     break;
                 }
                 default:

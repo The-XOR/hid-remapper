@@ -8,7 +8,7 @@ const STICKY_FLAG = 1 << 0;
 const TAP_FLAG = 1 << 1;
 const HOLD_FLAG = 1 << 2;
 const CONFIG_SIZE = 32;
-const CONFIG_VERSION = 10;
+const CONFIG_VERSION = 18;
 const VENDOR_ID = 0xCAFE;
 const PRODUCT_ID = 0xBAF2;
 const DEFAULT_PARTIAL_SCROLL_TIMEOUT = 1000000;
@@ -17,16 +17,23 @@ const DEFAULT_GPIO_DEBOUNCE_TIME = 5;
 const DEFAULT_SCALING = 1000;
 const DEFAULT_MACRO_ENTRY_DURATION = 1;
 
-const NLAYERS = 4;
+const NLAYERS = 8;
 const NMACROS = 32;
 const NEXPRESSIONS = 8;
 const MACRO_ITEMS_IN_PACKET = 6;
 const IGNORE_AUTH_DEV_INPUTS_FLAG = 1 << 4;
 const GPIO_OUTPUT_MODE_FLAG = 1 << 5;
+const NORMALIZE_GAMEPAD_INPUTS_FLAG = 1 << 6;
+const HUB_PORT_NONE = 255;
+
+const QUIRK_FLAG_RELATIVE_MASK = 0b10000000;
+const QUIRK_FLAG_SIGNED_MASK = 0b01000000;
+const QUIRK_SIZE_MASK = 0b00111111;
 
 const LAYERS_USAGE_PAGE = 0xFFF10000;
 const EXPR_USAGE_PAGE = 0xFFF30000;
 const MIDI_USAGE_PAGE = 0xFFF70000;
+const BUTTON_USAGE_PAGE = 0x00090000;
 
 const RESET_INTO_BOOTSEL = 1;
 const SET_CONFIG = 2;
@@ -35,8 +42,8 @@ const CLEAR_MAPPING = 4;
 const ADD_MAPPING = 5;
 const GET_MAPPING = 6;
 const PERSIST_CONFIG = 7;
-const GET_OUR_USAGES = 8
-const GET_THEIR_USAGES = 9
+const GET_OUR_USAGES = 8;
+const GET_THEIR_USAGES = 9;
 const SUSPEND = 10;
 const RESUME = 11;
 const PAIR_NEW_DEVICE = 12;
@@ -50,6 +57,12 @@ const CLEAR_EXPRESSIONS = 19;
 const APPEND_TO_EXPRESSION = 20;
 const GET_EXPRESSION = 21;
 const SET_MONITOR_ENABLED = 22;
+const CLEAR_QUIRKS = 23;
+const ADD_QUIRK = 24;
+const GET_QUIRK = 25;
+
+const PERSIST_CONFIG_SUCCESS = 1;
+const PERSIST_CONFIG_CONFIG_TOO_BIG = 2;
 
 const ops = {
     "PUSH": 0,
@@ -86,11 +99,35 @@ const ops = {
     "SQRT": 31,
     "ATAN2": 32,
     "ROUND": 33,
-}
+    "PORT": 34,
+    "DPAD": 35,
+    "EOL": 36,
+    "INPUT_STATE_FP32": 37,
+    "PREV_INPUT_STATE_FP32": 38,
+    "MIN": 39,
+    "MAX": 40,
+    "IFTE": 41,
+    "DIV": 42,
+    "SWAP": 43,
+    "MONITOR": 44,
+    "SIGN": 45,
+    "SUB": 46,
+    "PRINT_IF": 47,
+    "TIME_SEC": 48,
+    "LT": 49,
+    "PLUGGED_IN": 50,
+    "INPUT_STATE_SCALED": 51,
+    "PREV_INPUT_STATE_SCALED": 52,
+    "DEADZONE": 53,
+    "DEADZONE2": 54,
+};
 
 const opcodes = Object.fromEntries(Object.entries(ops).map(([key, value]) => [value, key]));
 
+const expr_re = /((?:\/\*.*?\*\/)?)((?:(?!\/\*).)*)/gs;
+
 const UINT8 = Symbol('uint8');
+const UINT16 = Symbol('uint16');
 const UINT32 = Symbol('uint32');
 const INT32 = Symbol('int32');
 
@@ -100,7 +137,7 @@ let target_modal = null;
 let extra_usages = { 'source': [], 'target': [] };
 let config = {
     'version': CONFIG_VERSION,
-    'unmapped_passthrough_layers': [0, 1, 2, 3],
+    'unmapped_passthrough_layers': [0, 1, 2, 3, 4, 5, 6, 7],
     'partial_scroll_timeout': DEFAULT_PARTIAL_SCROLL_TIMEOUT,
     'tap_hold_threshold': DEFAULT_TAP_HOLD_THRESHOLD,
     'gpio_debounce_time_ms': DEFAULT_GPIO_DEBOUNCE_TIME,
@@ -109,6 +146,8 @@ let config = {
     'ignore_auth_dev_inputs': false,
     'macro_entry_duration': DEFAULT_MACRO_ENTRY_DURATION,
     'gpio_output_mode': 0,
+    'input_labels': 0,
+    'normalize_gamepad_inputs': true,
     mappings: [{
         'source_usage': '0x00000000',
         'target_usage': '0x00000000',
@@ -117,6 +156,8 @@ let config = {
         'tap': false,
         'hold': false,
         'scaling': DEFAULT_SCALING,
+        'source_port': 0,
+        'target_port': 0,
     }],
     macros: [
         [], [], [], [], [], [], [], [], [], [], [], [], [], [], [], [],
@@ -125,12 +166,18 @@ let config = {
     expressions: [
         '', '', '', '', '', '', '', ''
     ],
+    quirks: [],
 };
 let monitor_enabled = false;
 let monitor_min_val = {};
 let monitor_max_val = {};
+let unique_id_counter = 0;
+let save_to_device_checkmark_timeout_id = null;
+let busy = false;
 const ignored_usages = new Set([
 ]);
+let modal_return_mapping = null;
+let modal_return_element = null;
 
 document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("open_device").addEventListener("click", open_device);
@@ -145,6 +192,7 @@ document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("clear_bonds").addEventListener("click", clear_bonds);
     document.getElementById("monitor_clear").addEventListener("click", monitor_clear);
     document.getElementById("file_input").addEventListener("change", file_uploaded);
+    document.getElementById("add_quirk").addEventListener("click", add_empty_quirk);
 
     device_buttons_set_disabled_state(true);
 
@@ -158,10 +206,17 @@ document.addEventListener("DOMContentLoaded", function () {
     document.getElementById("interval_override_dropdown").addEventListener("change", interval_override_onchange);
     document.getElementById("our_descriptor_number_dropdown").addEventListener("change", our_descriptor_number_onchange);
     document.getElementById("gpio_output_mode_dropdown").addEventListener("change", gpio_output_mode_onchange);
+    document.getElementById("input_labels_dropdown").addEventListener("change", input_labels_onchange("input_labels_dropdown"));
+    document.getElementById("input_labels_modal_dropdown").addEventListener("change", input_labels_onchange("input_labels_modal_dropdown"));
     document.getElementById("ignore_auth_dev_inputs_checkbox").addEventListener("change", ignore_auth_dev_inputs_onchange);
+    document.getElementById("normalize_gamepad_inputs_checkbox").addEventListener("change", normalize_gamepad_inputs_onchange);
 
     document.getElementById("nav-monitor-tab").addEventListener("shown.bs.tab", monitor_tab_shown);
     document.getElementById("nav-monitor-tab").addEventListener("hide.bs.tab", monitor_tab_hide);
+
+    document.getElementById("input-column-header").addEventListener("click", sort_by(['source_port', 'source_usage', 'target_usage', 'layers']));
+    document.getElementById("output-column-header").addEventListener("click", sort_by(['target_usage', 'source_port', 'source_usage', 'layers']));
+    document.getElementById("layer-column-header").addEventListener("click", sort_by(['layers', 'source_port', 'source_usage', 'target_usage']));
 
     if ("hid" in navigator) {
         navigator.hid.addEventListener('disconnect', hid_on_disconnect);
@@ -178,26 +233,36 @@ document.addEventListener("DOMContentLoaded", function () {
 });
 
 async function open_device() {
+    if (busy) {
+        return;
+    }
+    busy = true;
+
     clear_error();
     let success = false;
-    const devices = await navigator.hid.requestDevice({
-        filters: [{ usagePage: 0xFF00, usage: 0x0020 }]
-    }).catch((err) => { display_error(err); });
-    const config_interface = devices?.find(d => d.collections.some(c => c.usagePage == 0xff00));
-    if (config_interface !== undefined) {
-        device = config_interface;
-        if (!device.opened) {
-            await device.open().catch((err) => { display_error(err + "\nIf you're on Linux, you might need to give yourself permissions to the appropriate /dev/hidraw* device."); });
+
+    try {
+        const devices = await navigator.hid.requestDevice({
+            filters: [{ usagePage: 0xFF00, usage: 0x0020 }]
+        });
+        const config_interface = devices?.find(d => d.collections.some(c => c.usagePage == 0xff00));
+        if (config_interface !== undefined) {
+            device = config_interface;
+            if (!device.opened) {
+                await device.open().catch((err) => { display_error(err + "\nIf you're on Linux, you might need to give yourself permissions to the appropriate /dev/hidraw* device."); });
+            }
+            success = device.opened;
+            success &&= await check_device_version();
+            if (success) {
+                device.addEventListener('inputreport', input_report_received);
+                await set_monitor_enabled(monitor_enabled);
+                await get_usages_from_device();
+                setup_usages_modals();
+                bluetooth_buttons_set_visibility(device.productName.includes("Bluetooth"));
+            }
         }
-        success = device.opened;
-        success &&= await check_device_version();
-        if (success) {
-            device.addEventListener('inputreport', input_report_received);
-            await set_monitor_enabled(monitor_enabled);
-            await get_usages_from_device();
-            setup_usages_modals();
-            bluetooth_buttons_set_visibility(device.productName.includes("Bluetooth"));
-        }
+    } catch (e) {
+        display_error(e);
     }
 
     device_buttons_set_disabled_state(!success);
@@ -205,22 +270,32 @@ async function open_device() {
     if (!success) {
         device = null;
     }
+
+    busy = false;
 }
 
 async function load_from_device() {
     if (device == null) {
         return;
     }
+
+    if (busy) {
+        return;
+    }
+    busy = true;
+
     clear_error();
+
+    document.getElementById('load_from_device').disabled = true;
 
     try {
         await send_feature_command(GET_CONFIG);
-        const [config_version, flags, partial_scroll_timeout, mapping_count, our_usage_count, their_usage_count, interval_override, tap_hold_threshold, gpio_debounce_time_ms, our_descriptor_number, macro_entry_duration] =
-            await read_config_feature([UINT8, UINT8, UINT32, UINT32, UINT32, UINT32, UINT8, UINT32, UINT8, UINT8, UINT8]);
+        const [config_version, flags, unmapped_passthrough_layer_mask, partial_scroll_timeout, mapping_count, our_usage_count, their_usage_count, interval_override, tap_hold_threshold, gpio_debounce_time_ms, our_descriptor_number, macro_entry_duration, quirk_count] =
+            await read_config_feature([UINT8, UINT8, UINT8, UINT32, UINT16, UINT32, UINT32, UINT8, UINT32, UINT8, UINT8, UINT8, UINT16]);
         check_received_version(config_version);
 
         config['version'] = config_version;
-        config['unmapped_passthrough_layers'] = mask_to_layer_list(flags & ((1 << NLAYERS) - 1));
+        config['unmapped_passthrough_layers'] = mask_to_layer_list(unmapped_passthrough_layer_mask);
         config['partial_scroll_timeout'] = partial_scroll_timeout;
         config['tap_hold_threshold'] = tap_hold_threshold;
         config['gpio_debounce_time_ms'] = gpio_debounce_time_ms;
@@ -228,13 +303,14 @@ async function load_from_device() {
         config['our_descriptor_number'] = our_descriptor_number;
         config['ignore_auth_dev_inputs'] = !!(flags & IGNORE_AUTH_DEV_INPUTS_FLAG);
         config['gpio_output_mode'] = (flags & GPIO_OUTPUT_MODE_FLAG) ? 1 : 0;
+        config['normalize_gamepad_inputs'] = !!(flags & NORMALIZE_GAMEPAD_INPUTS_FLAG);
         config['macro_entry_duration'] = macro_entry_duration + 1;
         config['mappings'] = [];
 
         for (let i = 0; i < mapping_count; i++) {
             await send_feature_command(GET_MAPPING, [[UINT32, i]]);
-            const [target_usage, source_usage, scaling, layer_mask, mapping_flags] =
-                await read_config_feature([UINT32, UINT32, INT32, UINT8, UINT8]);
+            const [target_usage, source_usage, scaling, layer_mask, mapping_flags, hub_ports] =
+                await read_config_feature([UINT32, UINT32, INT32, UINT8, UINT8, UINT8]);
             config['mappings'].push({
                 'target_usage': '0x' + target_usage.toString(16).padStart(8, '0'),
                 'source_usage': '0x' + source_usage.toString(16).padStart(8, '0'),
@@ -243,6 +319,8 @@ async function load_from_device() {
                 'sticky': (mapping_flags & STICKY_FLAG) != 0,
                 'tap': (mapping_flags & TAP_FLAG) != 0,
                 'hold': (mapping_flags & HOLD_FLAG) != 0,
+                'source_port': hub_ports & 0x0F,
+                'target_port': (hub_ports >> 4) & 0x0F,
             });
         }
 
@@ -310,25 +388,64 @@ async function load_from_device() {
             config['expressions'].push(expression.join(' '));
         }
 
+        config['quirks'] = [];
+
+        for (let quirk_i = 0; quirk_i < quirk_count; quirk_i++) {
+            await send_feature_command(GET_QUIRK, [[UINT32, quirk_i]]);
+            const [vendor_id, product_id, interface_, report_id, usage, bitpos, size_flags] =
+                await read_config_feature([UINT16, UINT16, UINT8, UINT8, UINT32, UINT16, UINT8]);
+            config['quirks'].push({
+                'vendor_id': '0x' + vendor_id.toString(16).padStart(4, '0'),
+                'product_id': '0x' + product_id.toString(16).padStart(4, '0'),
+                'interface': interface_,
+                'report_id': report_id,
+                'usage': '0x' + usage.toString(16).padStart(8, '0'),
+                'bitpos': bitpos,
+                'size': size_flags & QUIRK_SIZE_MASK,
+                'relative': (size_flags & QUIRK_FLAG_RELATIVE_MASK) != 0,
+                'signed': (size_flags & QUIRK_FLAG_SIGNED_MASK) != 0,
+            });
+        }
+
         set_ui_state();
+        validate_ui_expressions();
     } catch (e) {
         display_error(e);
     }
+
+    if (device != null) {
+        document.getElementById('load_from_device').disabled = false;
+    }
+
+    busy = false;
 }
 
 async function save_to_device() {
     if (device == null) {
         return;
     }
+
+    if (busy) {
+        return;
+    }
+    busy = true;
+
     clear_error();
+
+    document.getElementById('save_to_device').disabled = true;
+    if (save_to_device_checkmark_timeout_id != null) {
+        clearTimeout(save_to_device_checkmark_timeout_id);
+    }
+    document.getElementById('save_to_device_checkmark').classList.add('d-none');
 
     try {
         await send_feature_command(SUSPEND);
-        const flags = layer_list_to_mask(config['unmapped_passthrough_layers']) |
-            (config['ignore_auth_dev_inputs'] ? IGNORE_AUTH_DEV_INPUTS_FLAG : 0) |
-            (config['gpio_output_mode'] ? GPIO_OUTPUT_MODE_FLAG : 0);
+        const flags = (config['ignore_auth_dev_inputs'] ? IGNORE_AUTH_DEV_INPUTS_FLAG : 0) |
+            (config['gpio_output_mode'] ? GPIO_OUTPUT_MODE_FLAG : 0) |
+            (config['normalize_gamepad_inputs'] ? NORMALIZE_GAMEPAD_INPUTS_FLAG : 0);
         await send_feature_command(SET_CONFIG, [
             [UINT8, flags],
+            [UINT8, layer_list_to_mask(config['unmapped_passthrough_layers'])],
             [UINT32, config['partial_scroll_timeout']],
             [UINT8, config['interval_override']],
             [UINT32, config['tap_hold_threshold']],
@@ -346,7 +463,8 @@ async function save_to_device() {
                 [UINT8, layer_list_to_mask(mapping['layers'])],
                 [UINT8, (mapping['sticky'] ? STICKY_FLAG : 0)
                     | (mapping['tap'] ? TAP_FLAG : 0)
-                    | (mapping['hold'] ? HOLD_FLAG : 0)]
+                    | (mapping['hold'] ? HOLD_FLAG : 0)],
+                [UINT8, ((mapping['target_port'] & 0x0F) << 4) | (mapping['source_port'] & 0x0F)],
             ]);
         }
 
@@ -411,11 +529,51 @@ async function save_to_device() {
             expr_i++;
         }
 
+        await send_feature_command(CLEAR_QUIRKS);
+        for (const quirk of config['quirks']) {
+            const size_flags = (quirk['size'] & QUIRK_SIZE_MASK) |
+                (quirk['relative'] ? QUIRK_FLAG_RELATIVE_MASK : 0) |
+                (quirk['signed'] ? QUIRK_FLAG_SIGNED_MASK : 0);
+            await send_feature_command(ADD_QUIRK, [
+                [UINT16, parseInt(quirk['vendor_id'], 16)],
+                [UINT16, parseInt(quirk['product_id'], 16)],
+                [UINT8, quirk['interface']],
+                [UINT8, quirk['report_id']],
+                [UINT32, parseInt(quirk['usage'], 16)],
+                [UINT16, quirk['bitpos']],
+                [UINT8, size_flags],
+            ]);
+        }
+
         await send_feature_command(PERSIST_CONFIG);
+
+        let [persist_config_return_code] = await read_config_feature([UINT8]);
+
         await send_feature_command(RESUME);
+
+        switch (persist_config_return_code) {
+            case PERSIST_CONFIG_SUCCESS:
+                document.getElementById('save_to_device_checkmark').classList.remove('d-none');
+                save_to_device_checkmark_timeout_id = setTimeout(() => {
+                    document.getElementById('save_to_device_checkmark').classList.add('d-none');
+                    save_to_device_checkmark_timeout_id = null;
+                }, 3000);
+                break;
+            case PERSIST_CONFIG_CONFIG_TOO_BIG:
+                display_error('Configuration too big to persist.');
+                break;
+            default:
+                throw new Error('Unknown PERSIST_CONFIG return code (' + return_code + ').');
+        }
     } catch (e) {
         display_error(e);
     }
+
+    if (device != null) {
+        document.getElementById('save_to_device').disabled = false;
+    }
+
+    busy = false;
 }
 
 async function do_get_usages_from_device(command, rle_count) {
@@ -447,19 +605,15 @@ async function do_get_usages_from_device(command, rle_count) {
 }
 
 async function get_usages_from_device() {
-    try {
-        await send_feature_command(GET_CONFIG);
-        const [config_version, flags, partial_scroll_timeout, mapping_count, our_usage_count, their_usage_count, tap_hold_threshold, gpio_debounce_time_ms, our_descriptor_number, macro_entry_duration] =
-            await read_config_feature([UINT8, UINT8, UINT32, UINT32, UINT32, UINT32, UINT32, UINT8, UINT8, UINT8]);
-        check_received_version(config_version);
+    await send_feature_command(GET_CONFIG);
+    const [config_version, flags, unmapped_passthrough_layer_mask, partial_scroll_timeout, mapping_count, our_usage_count, their_usage_count, interval_override, tap_hold_threshold, gpio_debounce_time_ms, our_descriptor_number, macro_entry_duration, quirk_count] =
+        await read_config_feature([UINT8, UINT8, UINT8, UINT32, UINT16, UINT32, UINT32, UINT8, UINT32, UINT8, UINT8, UINT8, UINT16]);
+    check_received_version(config_version);
 
-        extra_usages['target'] =
-            await do_get_usages_from_device(GET_OUR_USAGES, our_usage_count);
-        extra_usages['source'] =
-            await do_get_usages_from_device(GET_THEIR_USAGES, their_usage_count);
-    } catch (e) {
-        display_error(e);
-    }
+    extra_usages['target'] =
+        await do_get_usages_from_device(GET_OUR_USAGES, our_usage_count);
+    extra_usages['source'] =
+        await do_get_usages_from_device(GET_THEIR_USAGES, their_usage_count);
 }
 
 function set_config_ui_state() {
@@ -475,6 +629,9 @@ function set_config_ui_state() {
     document.getElementById('ignore_auth_dev_inputs_checkbox').checked = config['ignore_auth_dev_inputs'];
     document.getElementById('macro_entry_duration_input').value = config['macro_entry_duration'];
     document.getElementById('gpio_output_mode_dropdown').value = config['gpio_output_mode'];
+    document.getElementById('input_labels_dropdown').value = config['input_labels'];
+    document.getElementById('input_labels_modal_dropdown').value = config['input_labels'];
+    document.getElementById('normalize_gamepad_inputs_checkbox').checked = config['normalize_gamepad_inputs'];
 }
 
 function set_mappings_ui_state() {
@@ -499,7 +656,7 @@ function set_macros_ui_state() {
             for (const item of entry) {
                 const item_element = add_macro_item(entry_element);
                 const usage_button_element = item_element.querySelector('.macro_item_usage');
-                usage_button_element.innerText = readable_target_usage_name(item);
+                usage_button_element.querySelector('.button_label').innerText = readable_target_usage_name(item);
                 usage_button_element.title = item;
                 usage_button_element.setAttribute('data-hid-usage', item);
             }
@@ -517,7 +674,7 @@ function set_macro_previews() {
     for (let i = 0; i < NMACROS; i++) {
         const macro_element = document.getElementById('macro_' + i);
         const preview = Array.from(macro_element.querySelectorAll('.macro_entry'),
-            (entry_element) => Array.from(entry_element.querySelectorAll('.macro_item_usage'),
+            (entry_element) => Array.from(entry_element.querySelectorAll('.macro_item_usage .button_label'),
                 (item_element) => item_element.innerText == "Nothing" ? "∅" : item_element.innerText
             ).join('+')).join(', ');
         macro_element.querySelector('.macro_preview').innerText = preview;
@@ -532,6 +689,9 @@ function set_expressions_ui_state() {
         if (/^[0-9-]/.test(op)) {
             return (parseInt(op, 10) / 1000).toString();
         }
+        if (op.toLowerCase() == 'eol') {
+            return '\n';
+        }
         return op;
     }
 
@@ -541,8 +701,13 @@ function set_expressions_ui_state() {
             break;
         }
 
-        document.getElementById('expression_' + expr_i).querySelector('.expression_input').value =
-            expr.split(/\s+/).map(json_to_ui).join(' ');
+        const expression_input = document.getElementById('expression_' + expr_i).querySelector('.expression_input');
+        const expression_text = [...expr.matchAll(expr_re).map(x => x[1] + x[2].split(/\s+/).map(json_to_ui).join(' ').replace(/( )?\n /g, '\n'))].join('');
+        expression_input.value = expression_text;
+
+        const eols = expression_text.match(/\n/g);
+        // This doesn't take wrapped lines into consideration.
+        expression_input.rows = eols == null ? 1 : eols.length + 1;
 
         expr_i++;
     }
@@ -582,6 +747,23 @@ function set_ui_state() {
         config['macro_entry_duration'] = DEFAULT_MACRO_ENTRY_DURATION;
         config['gpio_output_mode'] = 0;
     }
+    if (config['version'] < 11) {
+        for (const mapping of config['mappings']) {
+            mapping['source_port'] = 0;
+            mapping['target_port'] = 0;
+        }
+    }
+    if (config['version'] < 12) {
+        config['quirks'] = [];
+    }
+    if (config['version'] < 16) {
+        config['input_labels'] = 0;
+    }
+    if (config['version'] < 18) {
+        // Normalize gamepad inputs defaults to true, but if we're loading a <18 config,
+        // set it to false to preserve previous behavior.
+        config['normalize_gamepad_inputs'] = false;
+    }
     if (config['version'] < CONFIG_VERSION) {
         config['version'] = CONFIG_VERSION;
     }
@@ -590,7 +772,18 @@ function set_ui_state() {
     set_mappings_ui_state();
     set_macros_ui_state();
     set_expressions_ui_state();
+    set_quirks_ui_state();
     setup_usages_modals();
+}
+
+function set_port_badge(button_element, port) {
+    const port_badge = button_element.querySelector('.hub_port_badge');
+    port_badge.innerText = port;
+    if (port == 0) {
+        port_badge.classList.add('d-none');
+    } else {
+        port_badge.classList.remove('d-none');
+    }
 }
 
 function add_mapping(mapping) {
@@ -616,19 +809,24 @@ function add_mapping(mapping) {
         layer_checkbox.addEventListener("change", layer_checkbox_onchange(mapping, layer_checkbox, i));
     }
     const source_button = clone.querySelector(".source_button");
-    source_button.innerText =
+    source_button.querySelector('.button_label').innerText =
         'source_name' in mapping ? mapping['source_name'] : readable_usage_name(mapping['source_usage']);
     source_button.setAttribute('data-hid-usage', mapping['source_usage']);
     source_button.title = mapping['source_usage'];
-    source_button.addEventListener("click", show_usage_modal(mapping, 'source', source_button));
+    source_button.addEventListener("click", show_usage_modal(mapping, 'source', clone));
+    set_port_badge(source_button, mapping['source_port']);
     const target_button = clone.querySelector(".target_button");
-    target_button.innerText = readable_target_usage_name(mapping['target_usage']);
+    target_button.querySelector('.button_label').innerText = readable_target_usage_name(mapping['target_usage']);
     target_button.setAttribute('data-hid-usage', mapping['target_usage']);
     target_button.title = mapping['target_usage'];
-    target_button.addEventListener("click", show_usage_modal(mapping, 'target', target_button));
+    target_button.addEventListener("click", show_usage_modal(mapping, 'target', clone));
+    set_port_badge(target_button, mapping['target_port']);
     container.appendChild(clone);
     set_forced_layers(mapping, clone);
     set_forced_flags(mapping, clone);
+    if (modal_return_mapping === mapping) {
+        modal_return_element = clone;
+    }
 }
 
 function download_json() {
@@ -703,6 +901,10 @@ async function send_feature_command(command, fields = [], version = CONFIG_VERSI
                 dataview.setUint8(pos, value);
                 pos += 1;
                 break;
+            case UINT16:
+                dataview.setUint16(pos, value, true);
+                pos += 2;
+                break;
             case UINT32:
                 dataview.setUint32(pos, value, true);
                 pos += 4;
@@ -719,8 +921,23 @@ async function send_feature_command(command, fields = [], version = CONFIG_VERSI
 }
 
 async function read_config_feature(fields = []) {
-    const data_with_report_id = await device.receiveFeatureReport(REPORT_ID_CONFIG);
-    const data = new DataView(data_with_report_id.buffer, 1);
+    let attempts_left = 10;
+    let delay = 2;
+    let data;
+    while (true) {
+        const data_with_report_id = await device.receiveFeatureReport(REPORT_ID_CONFIG);
+        data = new DataView(data_with_report_id.buffer, 1);
+        if (data.byteLength > 0) {
+            break;
+        } else {
+            if ((--attempts_left) > 0) {
+                await (new Promise(resolve => setTimeout(resolve, delay)));
+                delay *= 2;
+                continue;
+            }
+            throw new Error('Error in read_config_feature (given up retrying).');
+        }
+    }
     check_crc(data);
     let ret = [];
     let pos = 0;
@@ -729,6 +946,10 @@ async function read_config_feature(fields = []) {
             case UINT8:
                 ret.push(data.getUint8(pos));
                 pos += 1;
+                break;
+            case UINT16:
+                ret.push(data.getUint16(pos, true));
+                pos += 2;
                 break;
             case UINT32:
                 ret.push(data.getUint32(pos, true));
@@ -768,7 +989,7 @@ function add_crc(data) {
 }
 
 function check_json_version(config_version) {
-    if (!([3, 4, 5, 6, 7, 8, 9, 10].includes(config_version))) {
+    if (!([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18].includes(config_version))) {
         throw new Error("Incompatible version.");
     }
 }
@@ -784,7 +1005,7 @@ async function check_device_version() {
     // device because it could be version X, ignore our GET_CONFIG call with version Y and
     // just happen to have Y at the right place in the buffer from some previous call done
     // by some other software.
-    for (const version of [CONFIG_VERSION, 9, 8, 7, 6, 5, 4, 3, 2]) {
+    for (const version of [CONFIG_VERSION, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2]) {
         await send_feature_command(GET_CONFIG, [], version);
         const [received_version] = await read_config_feature([UINT8]);
         if (received_version == version) {
@@ -793,12 +1014,13 @@ async function check_device_version() {
             }
             display_error_html('<p>Incompatible version (' + version + ').</p>' +
                 '<p>Please consider upgrading your HID Remapper firmware to the <a href="https://github.com/jfedor2/hid-remapper/releases/latest">latest version</a>.</p>' +
-                '<p class="mb-0">Alternatively, click <a href="v' + version + '/">here</a> for an older version of the configuration tool that should be compatible with your device.</p>');
+                '<p>Alternatively, click <a href="v' + version + '/">here</a> for an older version of the configuration tool that should be compatible with your device.</p>' +
+                '<p class="mb-0">(You can also use the older version of the configuration tool to put your HID Remapper in firmware flashing mode and upgrade the firmware.)</p>');
             return false;
         }
     }
 
-    display_error_html('<p>Incompatible version.</p><p class="mb-0">Please consider upgrading your HID Remapper firmware to the <a href="https://github.com/jfedor2/hid-remapper/releases/latest">latest version</a>.</p>');
+    display_error_html('<p>Incompatible version.</p><p class="mb-0">You might have a newer version of the firmware on your HID Remapper than this configuration tool was made for.</p>');
     return false;
 }
 
@@ -855,6 +1077,9 @@ function layer_checkbox_onchange(mapping, element, layer) {
 
 function expression_onchange(i) {
     const ui_to_json = function (op) {
+        if (op.startsWith('/*')) {
+            return op;
+        }
         if (op.toLowerCase().startsWith('0x')) {
             if (isNaN(parseInt(op, 16))) {
                 throw new Error('Invalid expression: "' + op + '"');
@@ -878,7 +1103,10 @@ function expression_onchange(i) {
         const expr_input = document.getElementById('expression_' + i).querySelector('.expression_input');
         try {
             config['expressions'][i] =
-                expr_input.value.split(/\s+/).filter((x) => (x.length > 0)).map(ui_to_json).join(' ');
+                [...expr_input.value.matchAll(expr_re).map(x => [
+                    x[1],
+                    ...x[2].replace(/\n/g, " eol ").split(/\s+/)
+                ])].flat().filter((x) => (x.length > 0)).map(ui_to_json).join(' ');
             expr_input.classList.remove('is-invalid');
         } catch (e) {
             expr_input.classList.add('is-invalid');
@@ -887,8 +1115,12 @@ function expression_onchange(i) {
     }
 }
 
-function show_usage_modal(mapping, source_or_target, element) {
+function show_usage_modal(mapping_, source_or_target, element_) {
     return function () {
+        // When set_mappings_ui_state() recreates the elements, it will update modal_return_element to
+        // the correct element for the mapping we save in modal_return_mapping here.
+        modal_return_mapping = mapping_;
+        modal_return_element = element_;
         // XXX it would be better not to do this every time we show the modal
         const modal_element = document.getElementById(
             (source_or_target == 'source' ? 'source' : 'target') + '_usage_modal');
@@ -897,11 +1129,14 @@ function show_usage_modal(mapping, source_or_target, element) {
             let clone = button.cloneNode(true);
             button.parentNode.replaceChild(clone, button); // to clear existing event listeners
             clone.addEventListener("click", function () {
+                const mapping = modal_return_mapping;
+                const element = (source_or_target == 'macro_item') ? modal_return_element :
+                    modal_return_element.querySelector('.' + source_or_target + '_button');
                 let usage = clone.getAttribute('data-hid-usage');
                 if (mapping !== null) {
                     mapping[source_or_target + '_usage'] = usage;
                 }
-                element.innerText =
+                element.querySelector('.button_label').innerText =
                     source_or_target == "source" ? readable_usage_name(usage) : readable_target_usage_name(usage);
 
                 element.title = usage;
@@ -922,6 +1157,25 @@ function show_usage_modal(mapping, source_or_target, element) {
                 modal_.hide();
             });
         });
+        const hub_port_container = modal_element.querySelector('.hub_port_container');
+        if (source_or_target == "macro_item") {
+            hub_port_container.querySelectorAll('.hub_port_inputs').forEach((x) => x.classList.add('d-none'));
+        } else {
+            if (source_or_target == "target") {
+                hub_port_container.querySelectorAll('.hub_port_inputs').forEach((x) => x.classList.remove('d-none'));
+            }
+            const hub_port_dropdown = hub_port_container.querySelector('.hub_port_dropdown');
+            const clone = hub_port_dropdown.cloneNode(true);
+            hub_port_dropdown.parentElement.replaceChild(clone, hub_port_dropdown); // to clear existing event listeners
+            clone.value = mapping_[source_or_target + '_port'];
+            clone.addEventListener("change", function () {
+                const mapping = modal_return_mapping;
+                const element = modal_return_element.querySelector('.' + source_or_target + '_button');
+                const hub_port = parseInt(clone.value, 10)
+                set_port_badge(element, hub_port);
+                mapping[source_or_target + '_port'] = hub_port;
+            });
+        }
         modal_.show();
     };
 }
@@ -934,7 +1188,9 @@ function add_empty_mapping(source_usage = '0x00000000') {
         'sticky': false,
         'tap': false,
         'hold': false,
-        'scaling': DEFAULT_SCALING
+        'scaling': DEFAULT_SCALING,
+        'source_port': 0,
+        'target_port': 0,
     };
     config['mappings'].push(new_mapping);
     add_mapping(new_mapping);
@@ -952,15 +1208,23 @@ function map_this_onclick(usage) {
     }
 }
 
+function set_label_groups_visibility() {
+    document.getElementById('source_usage_modal').querySelector('.mouse_usages').classList.toggle('d-none', config['input_labels'] != 0);
+    document.getElementById('source_usage_modal').querySelector('.gamepad_usages').classList.toggle('d-none', config['input_labels'] != 1);
+    usage_search_onchange(document.getElementById('source_usage_modal').querySelector('.usage_search_box'))();
+}
+
 function setup_usages_modals() {
     setup_usage_modal('source');
     setup_usage_modal('target');
+    set_label_groups_visibility();
 }
 
 function setup_usage_modal(source_or_target) {
     const modal_element = document.getElementById(source_or_target + '_usage_modal');
     let usage_classes = {
         'mouse': modal_element.querySelector('.mouse_usages'),
+        'gamepad': modal_element.querySelector('.gamepad_usages'),
         'keyboard': modal_element.querySelector('.keyboard_usages'),
         'media': modal_element.querySelector('.media_usages'),
         'other': modal_element.querySelector('.other_usages'),
@@ -970,23 +1234,55 @@ function setup_usage_modal(source_or_target) {
         clear_children(element);
     }
     let template = document.getElementById('usage_button_template');
-    const relevant_usages = usages[source_or_target == 'source' ? 'source' : config['our_descriptor_number']];
-    for (const [usage, usage_def] of Object.entries(relevant_usages)) {
-        let clone = template.content.cloneNode(true).firstElementChild;
-        clone.innerText = usage_def['name'];
-        clone.title = usage;
-        clone.setAttribute('data-hid-usage', usage);
-        usage_classes[usage_def['class']].appendChild(clone);
-    }
-    for (const usage_ of extra_usages[source_or_target]) {
-        if (!(usage_ in relevant_usages)) {
+    const add_usage_buttons = (relevant_usages) => {
+        for (const [usage, usage_def] of Object.entries(relevant_usages)) {
             let clone = template.content.cloneNode(true).firstElementChild;
-            clone.innerText = usage_;
+            clone.innerText = usage_def['name'];
+            clone.title = usage;
+            clone.setAttribute('data-hid-usage', usage);
+            usage_classes[usage_def['class']].appendChild(clone);
+        }
+    }
+
+    let known_usages;
+    if (source_or_target == 'source') {
+        add_usage_buttons(usages['source_0']);
+        add_usage_buttons(usages['source_1']);
+        add_usage_buttons(usages['source']);
+        known_usages = { ...usages['source_0'], ...usages['source_1'], ...usages['source'] };
+    } else {
+        add_usage_buttons(usages[config['our_descriptor_number']]);
+        known_usages = usages[config['our_descriptor_number']];
+    }
+
+    for (const usage_ of extra_usages[source_or_target]) {
+        if (!(usage_ in known_usages)) {
+            let clone = template.content.cloneNode(true).firstElementChild;
+            clone.innerText = readable_usage_name(usage_);
             clone.title = usage_;
             clone.setAttribute('data-hid-usage', usage_);
             usage_classes['extra'].appendChild(clone);
         }
     }
+
+    const search_box = modal_element.querySelector('.usage_search_box');
+    search_box.addEventListener("keyup", usage_search_onchange(search_box));
+    search_box.addEventListener("keydown", (e) => {
+        if (e.key == 'Enter') {
+            modal_element.querySelectorAll('.usage_button').forEach((usage_button) => {
+                if (usage_button.hasAttribute('data-preferred-result')) {
+                    usage_button.click();
+                }
+            });
+        }
+    });
+    modal_element.addEventListener('show.bs.modal', () => {
+        search_box.value = "";
+        usage_search_onchange(search_box)();
+    });
+    modal_element.addEventListener('shown.bs.modal', () => {
+        search_box.focus();
+    });
 }
 
 function setup_macros() {
@@ -1127,6 +1423,10 @@ function ignore_auth_dev_inputs_onchange() {
     config['ignore_auth_dev_inputs'] = document.getElementById("ignore_auth_dev_inputs_checkbox").checked;
 }
 
+function normalize_gamepad_inputs_onchange() {
+    config['normalize_gamepad_inputs'] = document.getElementById("normalize_gamepad_inputs_checkbox").checked;
+}
+
 function macro_entry_duration_onchange() {
     let value = parseInt(document.getElementById("macro_entry_duration_input").value, 10);
     if (isNaN(value)) {
@@ -1139,6 +1439,16 @@ function macro_entry_duration_onchange() {
         value = 256;
     }
     config['macro_entry_duration'] = value;
+}
+
+function input_labels_onchange(element_id) {
+    return function () {
+        config['input_labels'] = parseInt(document.getElementById(element_id).value, 10);
+        document.getElementById("input_labels_dropdown").value = config['input_labels'];
+        document.getElementById("input_labels_modal_dropdown").value = config['input_labels'];
+        set_mappings_ui_state();
+        set_label_groups_visibility();
+    }
 }
 
 function load_example(n) {
@@ -1203,6 +1513,18 @@ function layer_list_to_mask(layers) {
 }
 
 function readable_usage_name(usage, default_to_hex = true) {
+    if (usage in usages['source_' + config['input_labels']]) {
+        return usages['source_' + config['input_labels']][usage]['name'];
+    }
+    if (usage in usages['source']) {
+        return usages['source'][usage]['name'];
+    }
+    if (usage in usages['source_extra']) {
+        return usages['source_extra'][usage]['name'];
+    }
+    if (((usage & 0xFFFF0000) >>> 0) == BUTTON_USAGE_PAGE) {
+        return 'Button ' + (usage & 0xFFFF);
+    }
     if (((usage & 0xFFFF0000) >>> 0) == MIDI_USAGE_PAGE) {
         const status = (usage >> 8) & 0xF0;
         const channel = (usage >> 8) & 0x0F;
@@ -1222,7 +1544,7 @@ function readable_usage_name(usage, default_to_hex = true) {
                 return prefix + ' PB';
         }
     }
-    return (usage in usages['source']) ? usages['source'][usage]['name'] : (default_to_hex ? usage : '');
+    return default_to_hex ? usage : '';
 }
 
 function readable_target_usage_name(usage) {
@@ -1287,7 +1609,7 @@ function expr_to_elems(expr) {
         throw new Error('Invalid expression: "' + elem + '"');
     }
 
-    return expr.split(/\s+/).filter((x) => (x.length > 0)).map(convert_elem);
+    return [...expr.matchAll(expr_re).map(x => x[2])].join('').split(/\s+/).filter((x) => (x.length > 0)).map(convert_elem);
 }
 
 function validate_ui_expressions() {
@@ -1302,25 +1624,34 @@ function input_report_received(event) {
             element.classList.remove('bg-light');
         });
         for (let i = 0; i < 7; i++) {
-            const usage = "0x" + event.data.getUint32(i * 8, true).toString(16).padStart(8, "0");
-            const value = event.data.getInt32(i * 8 + 4, true);
+            const usage = "0x" + event.data.getUint32(i * 9, true).toString(16).padStart(8, "0");
+            const value = event.data.getInt32(i * 9 + 4, true);
+            const hub_port = event.data.getUint8(i * 9 + 8);
             if (usage != 0) {
-                update_monitor_ui(usage, value);
+                update_monitor_ui(usage, value, hub_port);
             }
         }
     }
 }
 
-function update_monitor_ui(usage, value) {
-    let element = document.getElementById('monitor_usage_' + usage);
+function update_monitor_ui(usage, value, hub_port) {
+    const element_id = 'monitor_usage_' + usage + '_' + hub_port;
+    let element = document.getElementById(element_id);
     if (element == null) {
         const template = document.getElementById("monitor_template");
         const container = document.getElementById("monitor_container");
         element = template.content.cloneNode(true).firstElementChild;
-        element.querySelector('.monitor_usage').innerText = usage;
+        element.querySelector('.monitor_usage .usage_label').innerText = usage;
+        const port_badge = element.querySelector('.monitor_usage .hub_port_badge');
+        port_badge.innerText = hub_port;
+        if ((hub_port == 0) || (hub_port == HUB_PORT_NONE)) {
+            port_badge.classList.add('d-none');
+        } else {
+            port_badge.classList.remove('d-none');
+        }
         element.querySelector('.monitor_readable_name').innerText = readable_usage_name(usage, false);
         element.querySelector('.map_this_button').addEventListener("click", map_this_onclick(usage));
-        element.id = 'monitor_usage_' + usage;
+        element.id = element_id;
         container.appendChild(element);
     }
 
@@ -1328,12 +1659,13 @@ function update_monitor_ui(usage, value) {
 
     element.querySelector('.monitor_last_value').innerText = value;
     element.classList.add('bg-light');
-    if (!(usage in monitor_min_val) || (value < monitor_min_val[usage])) {
-        monitor_min_val[usage] = value;
+    const key = usage + '_' + hub_port;
+    if (!(key in monitor_min_val) || (value < monitor_min_val[key])) {
+        monitor_min_val[key] = value;
         element.querySelector('.monitor_min_value').innerText = value;
     }
-    if (!(usage in monitor_max_val) || (value > monitor_max_val[usage])) {
-        monitor_max_val[usage] = value;
+    if (!(key in monitor_max_val) || (value > monitor_max_val[key])) {
+        monitor_max_val[key] = value;
         element.querySelector('.monitor_max_value').innerText = value;
     }
 }
@@ -1358,4 +1690,159 @@ async function monitor_tab_shown(event) {
 
 async function monitor_tab_hide(event) {
     await set_monitor_enabled(false);
+}
+
+function add_quirk(quirk) {
+    const template = document.getElementById("quirk_template");
+    const container = document.getElementById("quirks_container");
+    const clone = template.content.cloneNode(true).firstElementChild;
+    clone.querySelector(".delete_button").addEventListener("click", delete_quirk(quirk, clone));
+    const vendor_id_input = clone.querySelector('.vendor_id_input');
+    vendor_id_input.value = quirk['vendor_id'].replace(/^0[xX]/, '');
+    vendor_id_input.addEventListener("change", quirk_hex_change('vendor_id', quirk, vendor_id_input));
+    const product_id_input = clone.querySelector('.product_id_input');
+    product_id_input.value = quirk['product_id'].replace(/^0[xX]/, '');
+    product_id_input.addEventListener("change", quirk_hex_change('product_id', quirk, product_id_input));
+    const interface_input = clone.querySelector('.interface_input');
+    interface_input.value = quirk['interface'];
+    interface_input.addEventListener("change", quirk_number_change('interface', quirk, interface_input));
+    const report_id_input = clone.querySelector('.report_id_input');
+    report_id_input.value = quirk['report_id'];
+    report_id_input.addEventListener("change", quirk_number_change('report_id', quirk, report_id_input));
+    const usage_input = clone.querySelector('.usage_input');
+    usage_input.value = quirk['usage'].replace(/^0[xX]/, '');
+    usage_input.addEventListener("change", quirk_hex_change('usage', quirk, usage_input));
+    const size_input = clone.querySelector('.size_input');
+    size_input.value = quirk['size'];
+    size_input.addEventListener("change", quirk_number_change('size', quirk, size_input));
+    const bitpos_input = clone.querySelector('.bitpos_input');
+    bitpos_input.value = quirk['bitpos'];
+    bitpos_input.addEventListener("change", quirk_number_change('bitpos', quirk, bitpos_input));
+    const relative_checkbox = clone.querySelector(".relative_checkbox");
+    relative_checkbox.checked = quirk['relative'];
+    relative_checkbox.id = 'relative_checkbox' + unique_id_counter++;
+    relative_checkbox.addEventListener("change", quick_checkbox_onclick('relative', quirk, relative_checkbox));
+    clone.querySelector(".relative_checkbox_label").htmlFor = relative_checkbox.id;
+    const signed_checkbox = clone.querySelector(".signed_checkbox");
+    signed_checkbox.checked = quirk['signed'];
+    signed_checkbox.id = 'signed_checkbox' + unique_id_counter++;
+    signed_checkbox.addEventListener("change", quick_checkbox_onclick('signed', quirk, signed_checkbox));
+    clone.querySelector(".signed_checkbox_label").htmlFor = signed_checkbox.id;
+    container.appendChild(clone);
+}
+
+function quirk_hex_change(field_name, quirk, element) {
+    return function () {
+        if (/^[0-9a-fA-F]+$/.test(element.value)) {
+            element.classList.remove('is-invalid');
+            quirk[field_name] = '0x' + element.value;
+        } else {
+            element.classList.add('is-invalid');
+            quirk[field_name] = '0x0000';
+        }
+    };
+}
+
+function quirk_number_change(field_name, quirk, element) {
+    return function () {
+        const value = parseInt(element.value, 10);
+        if (isNaN(value)) {
+            element.classList.add('is-invalid');
+            quirk[field_name] = 0;
+        } else {
+            quirk[field_name] = value;
+            element.classList.remove('is-invalid');
+        }
+    };
+}
+
+function quick_checkbox_onclick(field_name, quirk, element) {
+    return function () {
+        quirk[field_name] = element.checked;
+    };
+}
+
+function add_empty_quirk() {
+    let quirk = {
+        "vendor_id": "0x0000",
+        "product_id": "0x0000",
+        "interface": 0,
+        "report_id": 0,
+        "usage": "0x00000000",
+        "size": 0,
+        "bitpos": 0,
+        "relative": false,
+        "signed": false
+    };
+    config['quirks'].push(quirk);
+    add_quirk(quirk);
+}
+
+function delete_quirk(quirk, element) {
+    return function () {
+        config['quirks'] = config['quirks'].filter(x => x !== quirk);
+        document.getElementById("quirks_container").removeChild(element);
+    };
+}
+
+function set_quirks_ui_state() {
+    clear_children(document.getElementById('quirks_container'));
+    for (const quirk of config['quirks']) {
+        add_quirk(quirk);
+    }
+}
+
+function comparison_function(fields) {
+    return (a, b) => {
+        for (const field of fields) {
+            if (a[field] < b[field]) {
+                return -1;
+            }
+            if (a[field] > b[field]) {
+                return 1;
+            }
+        }
+        return 0;
+    };
+}
+
+function sort_by(fields) {
+    return (e) => {
+        e.preventDefault();
+        config['mappings'].sort(comparison_function(fields));
+        set_mappings_ui_state();
+    };
+}
+
+function usage_search_onchange(element) {
+    return () => {
+        const query = element.value.toLowerCase().replaceAll(" ", "");
+        const modal_element = element.closest('.modal');
+        let exact_match = null;
+        let last_match = null;
+        let hits = 0;
+        modal_element.querySelectorAll('.usage_button').forEach((usage_button) => {
+            const label = usage_button.innerText.toLowerCase().replaceAll(" ", "");
+            usage_button.classList.toggle('d-none', !label.includes(query));
+            usage_button.removeAttribute('data-preferred-result');
+            if (label.includes(query)) {
+                hits++;
+                last_match = usage_button;
+            }
+            if (label == query) {
+                exact_match = usage_button;
+            }
+        });
+        let have_preferred_result = false;
+        if (exact_match) {
+            exact_match.setAttribute('data-preferred-result', "1");
+            have_preferred_result = true;
+        } else {
+            if (hits == 1) {
+                last_match.setAttribute('data-preferred-result', "1");
+                have_preferred_result = true;
+            }
+        }
+        element.closest('div').querySelector('.have_preferred_result_checkmark').classList.toggle('d-none', !have_preferred_result);
+    }
 }

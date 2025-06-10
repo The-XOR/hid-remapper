@@ -3,6 +3,7 @@
 #include "pio_usb.h"
 #include "usb_midi_host.h"
 
+#include "pico/platform.h"
 #include "pico/time.h"
 
 #include "descriptor_parser.h"
@@ -10,11 +11,20 @@
 #include "remapper.h"
 #include "tick.h"
 
+static bool __no_inline_not_in_flash_func(manual_sof)(repeating_timer_t* rt) {
+    pio_usb_host_frame();
+    set_tick_pending();
+    return true;
+}
+
+static repeating_timer_t sof_timer;
+
 void extra_init() {
     pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
     pio_cfg.pin_dp = PICO_DEFAULT_PIO_USB_DP_PIN;
     pio_cfg.skip_alarm_pool = true;
     tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
+    add_repeating_timer_us(-1000, manual_sof, NULL, &sof_timer);
 }
 
 uint32_t get_gpio_valid_pins_mask() {
@@ -45,20 +55,28 @@ void interval_override_updated() {
 void flash_b_side() {
 }
 
-void descriptor_received_callback(uint16_t vendor_id, uint16_t product_id, const uint8_t* report_descriptor, int len, uint16_t interface) {
-    parse_descriptor(vendor_id, product_id, report_descriptor, len, interface);
+void descriptor_received_callback(uint16_t vendor_id, uint16_t product_id, const uint8_t* report_descriptor, int len, uint16_t interface, uint8_t hub_port, uint8_t itf_num) {
+    parse_descriptor(vendor_id, product_id, report_descriptor, len, interface, itf_num);
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len) {
     printf("tuh_hid_mount_cb\n");
 
+    uint8_t hub_addr;
+    uint8_t hub_port;
+    tuh_get_hub_addr_port(dev_addr, &hub_addr, &hub_port);
+
     uint16_t vid;
     uint16_t pid;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
 
-    descriptor_received_callback(vid, pid, desc_report, desc_len, (uint16_t) (dev_addr << 8) | instance);
+    tuh_itf_info_t itf_info;
+    tuh_hid_itf_get_info(dev_addr, instance, &itf_info);
+    uint8_t itf_num = itf_info.desc.bInterfaceNumber;
 
-    device_connected_callback((uint16_t) (dev_addr << 8) | instance, vid, pid);
+    descriptor_received_callback(vid, pid, desc_report, desc_len, (uint16_t) (dev_addr << 8) | instance, hub_port, itf_num);
+
+    device_connected_callback((uint16_t) (dev_addr << 8) | instance, vid, pid, hub_port);
 
     tuh_hid_receive_report(dev_addr, instance);
 }
@@ -87,9 +105,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 }
 
 void tuh_midi_rx_cb(uint8_t dev_addr, uint32_t num_packets) {
+    uint8_t hub_addr;
+    uint8_t hub_port;
+    tuh_get_hub_addr_port(dev_addr, &hub_addr, &hub_port);
+
     uint8_t buf[4];
     while (tuh_midi_packet_read(dev_addr, buf)) {
-        handle_received_midi(dev_addr, buf);
+        handle_received_midi(hub_port, buf);
     }
     reports_received = true;
 }
@@ -110,14 +132,7 @@ void send_out_report() {
     do_send_out_report();
 }
 
-static int64_t manual_sof(alarm_id_t id, void* user_data) {
-    pio_usb_host_frame();
-    set_tick_pending();
-    return 0;
-}
-
-void sof_callback() {
-    add_alarm_in_us(150, manual_sof, NULL, true);
+void __no_inline_not_in_flash_func(sof_callback)() {
 }
 
 void get_report_cb(uint8_t dev_addr, uint8_t interface, uint8_t report_id, uint8_t report_type, uint8_t* report, uint16_t len) {

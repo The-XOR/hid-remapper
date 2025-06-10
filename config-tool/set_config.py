@@ -34,26 +34,29 @@ our_descriptor_number = config.get("our_descriptor_number", 0)
 ignore_auth_dev_inputs = config.get("ignore_auth_dev_inputs", False)
 macro_entry_duration = config.get("macro_entry_duration", 1) - 1
 gpio_output_mode = config.get("gpio_output_mode", 0)
-
-flags = (
-    unmapped_passthrough_layer_mask
-    | (IGNORE_AUTH_DEV_INPUTS_FLAG if ignore_auth_dev_inputs else 0)
-    | (GPIO_OUTPUT_MODE_FLAG if gpio_output_mode == 1 else 0)
+normalize_gamepad_inputs = (
+    config.get("normalize_gamepad_inputs", True) if version >= 18 else False
 )
 
+flags = 0
+flags |= IGNORE_AUTH_DEV_INPUTS_FLAG if ignore_auth_dev_inputs else 0
+flags |= GPIO_OUTPUT_MODE_FLAG if gpio_output_mode == 1 else 0
+flags |= NORMALIZE_GAMEPAD_INPUTS_FLAG if normalize_gamepad_inputs else 0
+
 data = struct.pack(
-    "<BBBBLBLBBB13B",
+    "<BBBBBLBLBBB12B",
     REPORT_ID_CONFIG,
     CONFIG_VERSION,
     SET_CONFIG,
     flags,
+    unmapped_passthrough_layer_mask,
     partial_scroll_timeout,
     interval_override,
     tap_hold_threshold,
     gpio_debounce_time_ms,
     our_descriptor_number,
     macro_entry_duration,
-    *([0] * 13)
+    *([0] * 12)
 )
 device.send_feature_report(add_crc(data))
 
@@ -75,8 +78,11 @@ for mapping in config.get("mappings", []):
     if version >= 5:
         flags |= TAP_FLAG if mapping.get("tap", False) else 0
         flags |= HOLD_FLAG if mapping.get("hold", False) else 0
+    hub_ports = ((mapping.get("target_port", 0) & 0x0F) << 4) | (
+        mapping.get("source_port", 0) & 0x0F
+    )
     data = struct.pack(
-        "<BBBLLlBB12B",
+        "<BBBLLlBBB11B",
         REPORT_ID_CONFIG,
         CONFIG_VERSION,
         ADD_MAPPING,
@@ -85,7 +91,8 @@ for mapping in config.get("mappings", []):
         scaling,
         layer_mask,
         flags,
-        *([0] * 12)
+        hub_ports,
+        *([0] * 11)
     )
     device.send_feature_report(add_crc(data))
 
@@ -155,11 +162,56 @@ for expr_index, expr in enumerate(config.get("expressions", [])):
         )
         device.send_feature_report(add_crc(data))
 
+data = struct.pack(
+    "<BBB26B", REPORT_ID_CONFIG, CONFIG_VERSION, CLEAR_QUIRKS, *([0] * 26)
+)
+device.send_feature_report(add_crc(data))
+
+for quirk in config.get("quirks", []):
+    size_flags = (
+        (quirk["size"] & QUIRK_SIZE_MASK)
+        | (QUIRK_FLAG_RELATIVE_MASK if quirk["relative"] else 0)
+        | (QUIRK_FLAG_SIGNED_MASK if quirk["signed"] else 0)
+    )
+    data = struct.pack(
+        "<BBBHHBBLHB13B",
+        REPORT_ID_CONFIG,
+        CONFIG_VERSION,
+        ADD_QUIRK,
+        int(quirk["vendor_id"], 16),
+        int(quirk["product_id"], 16),
+        quirk["interface"],
+        quirk["report_id"],
+        int(quirk["usage"], 16),
+        quirk["bitpos"],
+        size_flags,
+        *([0] * 13)
+    )
+    device.send_feature_report(add_crc(data))
+
 
 data = struct.pack(
     "<BBB26B", REPORT_ID_CONFIG, CONFIG_VERSION, PERSIST_CONFIG, *([0] * 26)
 )
 device.send_feature_report(add_crc(data))
 
+data = get_feature_report(device, REPORT_ID_CONFIG, CONFIG_SIZE + 1)
+(
+    report_id,
+    persist_config_return_code,
+    *_,
+    crc,
+) = struct.unpack("<BB27BL", data)
+check_crc(data, crc)
+
 data = struct.pack("<BBB26B", REPORT_ID_CONFIG, CONFIG_VERSION, RESUME, *([0] * 26))
 device.send_feature_report(add_crc(data))
+
+if persist_config_return_code == PERSIST_CONFIG_SUCCESS:
+    pass
+elif persist_config_return_code == PERSIST_CONFIG_CONFIG_TOO_BIG:
+    raise Exception("Configuration too big to persist.")
+else:
+    raise Exception(
+        "Unknown PERSIST_CONFIG return code ({}).".format(persist_config_return_code)
+    )

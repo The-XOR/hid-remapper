@@ -20,9 +20,10 @@ std::vector<usage_rle_t> their_usages_rle;
 volatile bool need_to_persist_config = false;
 volatile bool their_descriptor_updated = false;
 volatile bool suspended = false;
+volatile bool resume_pending = false;
 volatile bool config_updated = false;
 
-uint8_t unmapped_passthrough_layer_mask = 0b00001111;
+uint8_t unmapped_passthrough_layer_mask = 0b11111111;
 uint32_t partial_scroll_timeout = 1000000;
 uint32_t tap_hold_threshold = 200000;
 uint64_t gpio_debounce_time = 5000;
@@ -30,8 +31,9 @@ uint8_t our_descriptor_number = 0;
 bool ignore_auth_dev_inputs = false;
 uint8_t macro_entry_duration = 0;  // 0 means 1ms
 uint8_t gpio_output_mode = 0;
+bool normalize_gamepad_inputs = true;
 
-std::vector<mapping_config_t> config_mappings;
+std::vector<mapping_config11_t> config_mappings;
 
 uint8_t resolution_multiplier = 0;
 
@@ -44,3 +46,11 @@ bool monitor_enabled = false;
 const our_descriptor_def_t* our_descriptor;
 
 uint8_t gpio_out_state[4] = { 0 };
+uint16_t digipot_state[NDIGIPOTS] = { 0 };
+
+std::vector<quirk_t> quirks;
+
+bool boot_protocol_keyboard = false;
+bool boot_protocol_updated = false;
+
+volatile PersistConfigReturnCode persist_config_return_code = PersistConfigReturnCode::UNKNOWN;

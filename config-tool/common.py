@@ -2,6 +2,8 @@ import hid
 import binascii
 import struct
 import itertools
+import re
+import time
 
 VENDOR_ID = 0xCAFE
 PRODUCT_ID = 0xBAF2
@@ -9,7 +11,7 @@ PRODUCT_ID = 0xBAF2
 CONFIG_USAGE_PAGE = 0xFF00
 CONFIG_USAGE = 0x0020
 
-CONFIG_VERSION = 10
+CONFIG_VERSION = 18
 CONFIG_SIZE = 32
 REPORT_ID_CONFIG = 100
 
@@ -19,7 +21,7 @@ DEFAULT_GPIO_DEBOUNCE_TIME = 5
 DEFAULT_SCALING = 1000
 DEFAULT_MACRO_ENTRY_DURATION = 1
 
-NLAYERS = 4
+NLAYERS = 8
 
 RESET_INTO_BOOTSEL = 1
 SET_CONFIG = 2
@@ -43,6 +45,12 @@ CLEAR_EXPRESSIONS = 19
 APPEND_TO_EXPRESSION = 20
 GET_EXPRESSION = 21
 SET_MONITOR_ENABLED = 22
+CLEAR_QUIRKS = 23
+ADD_QUIRK = 24
+GET_QUIRK = 25
+
+PERSIST_CONFIG_SUCCESS = 1
+PERSIST_CONFIG_CONFIG_TOO_BIG = 2
 
 
 UNMAPPED_PASSTHROUGH_FLAG = 0x01
@@ -52,10 +60,15 @@ HOLD_FLAG = 1 << 2
 
 IGNORE_AUTH_DEV_INPUTS_FLAG = 1 << 4
 GPIO_OUTPUT_MODE_FLAG = 1 << 5
+NORMALIZE_GAMEPAD_INPUTS_FLAG = 1 << 6
 
 NMACROS = 32
 NEXPRESSIONS = 8
 MACRO_ITEMS_IN_PACKET = 6
+
+QUIRK_FLAG_RELATIVE_MASK = 0b10000000
+QUIRK_FLAG_SIGNED_MASK = 0b01000000
+QUIRK_SIZE_MASK = 0b00111111
 
 ops = {
     "PUSH": 0,
@@ -92,6 +105,27 @@ ops = {
     "SQRT": 31,
     "ATAN2": 32,
     "ROUND": 33,
+    "PORT": 34,
+    "DPAD": 35,
+    "EOL": 36,
+    "INPUT_STATE_FP32": 37,
+    "PREV_INPUT_STATE_FP32": 38,
+    "MIN": 39,
+    "MAX": 40,
+    "IFTE": 41,
+    "DIV": 42,
+    "SWAP": 43,
+    "MONITOR": 44,
+    "SIGN": 45,
+    "SUB": 46,
+    "PRINT_IF": 47,
+    "TIME_SEC": 48,
+    "LT": 49,
+    "PLUGGED_IN": 50,
+    "INPUT_STATE_SCALED": 51,
+    "PREV_INPUT_STATE_SCALED": 52,
+    "DEADZONE": 53,
+    "DEADZONE2": 54,
 }
 
 opcodes = {v: k for k, v in ops.items()}
@@ -148,4 +182,19 @@ def convert_elem(elem):
 
 
 def expr_to_elems(expr):
-    return [convert_elem(x) for x in expr.split()]
+    return [convert_elem(x) for x in re.sub(r"(?s)/\*.*?\*/", " ", expr).split()]
+
+
+def get_feature_report(device, report_id, size):
+    attempts_left = 10
+    delay = 0.002
+    while True:
+        data = device.get_feature_report(report_id, size)
+        if len(data) > 1:
+            return data
+        attempts_left -= 1
+        if attempts_left > 0:
+            time.sleep(delay)
+            delay *= 2
+            continue
+        raise Exception("Error in get_feature_report (given up retrying)")
