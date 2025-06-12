@@ -247,6 +247,7 @@ int main() {
     set_mapping_from_config();
     board_init();
     extra_init();
+    sleep_ms(500); // aspetta che lo stack USB sia inizializzato
     tusb_init();
     stdio_init_all();
 
